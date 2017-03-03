@@ -511,7 +511,6 @@ def k_Pi_solver(A, delta, Phi, Pi, x, t):
     if rank==size-1:
 
         # Punto i=Nx:
-        #dPhiNx   = 0 # Forzamos el valor correcto en la frontera obtenido de la expansión en serie
         dPhiNx   = dPib(t) # Forzamos el valor correcto en la frontera obtenido de la expansión en serie
 
         # Corregimos la derivada con el valor regular
@@ -545,10 +544,6 @@ def k_Pi_solver(A, delta, Phi, Pi, x, t):
 
     # Añadimos la disipación en las demás particiones:
     der += disipacion
-
-    # En el caso con source necesitamos que la derivada en Nx sea nula:
-#    if rank==size-1:
-#        der[Nx] = 0.
 
     return der
     

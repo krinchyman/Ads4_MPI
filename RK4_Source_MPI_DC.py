@@ -11,6 +11,8 @@ from numba import autojit
 
 import argparse
     
+tmax = 500
+
 @autojit
 def Pib(t):
     
@@ -20,7 +22,10 @@ def Pib(t):
         
     else:    
   
-        return alpha*np.exp(-(tau/t)**2)
+        if t<=500:
+            return Pi0*np.exp(-(tau/t)**2)
+        else:
+            return Pi0*(1-np.exp(-(tau/(t-tmax))**2))
 
 @autojit
 def dPib(t):
@@ -31,7 +36,10 @@ def dPib(t):
         
     else:    
   
-        return 2*alpha*np.exp(-(tau/t)**2)*tau**2/t**3
+        if t<=500:
+            return 2*Pi0*np.exp(-(tau/t)**2)*tau**2/t**3
+        else:
+            return -2*Pi0*np.exp(-(tau/(t-tmax))**2)*tau**2/(t-tmax)**3
 
 @autojit
 def ddPib(t):
@@ -41,8 +49,11 @@ def ddPib(t):
         return 0
         
     else:    
-  
-        return 2*alpha*tau**2*(2*tau**2-3*t**2)*np.exp(-(tau/t)**2)/t**6
+        if t<=500:
+            return 2*Pi0*tau**2*(2*tau**2-3*t**2)*np.exp(-(tau/t)**2)/t**6
+        else:
+            return -2*Pi0*tau**2*(2*tau**2-3*(t-tmax)**2)*np.exp(-(tau/(t-tmax))**2)/(t-tmax)**6
+
 
 def crea_evolucion(fout, x):
 
@@ -251,7 +262,6 @@ def sim5pto(dx, vector, y0, ghost):
     integral   *= dx/720
 
     if rank==0:
-
         integral[ghost]   = y0
 
     integral  = integral.cumsum()
@@ -321,21 +331,13 @@ def disipacion8o(vector):
 @autojit
 def disipacion6o(vector):
     
-    disipacion = np.zeros_like(vector)
+    disipacion = np.empty_like(vector)
     
     # Generamos el vector disipación:
     for i in range(ghost,Nx+1):
         disipacion[i] = vector[i+3] - 6*(vector[i+2] + vector[i-2]) + 15*(vector[i+1] + vector[i-1]) - 20*vector[i] + vector[i-3]        
     
     disipacion *= Coef/dx
-
-    if rank==size-1:
-        for i in range(ghost):
-            disipacion[Nx-i] = 0.
-
-    if rank==0:
-        for i in range(ghost):
-            disipacion[ghost+i] = 0.
     
     return disipacion    
 
@@ -350,20 +352,23 @@ def delta_A_M_solver(Phi, Pi, x, t):
     # Necesitamos el valor del delta y de Pi en el boundary:
     if rank == size-1:
         delta_boundary = delta[Nx:Nx+1]
+        Pi_boundary    = Pi[Nx:Nx+1]
 
     else:
         delta_boundary = np.zeros(1)
+        Pi_boundary    = np.zeros(1)
 
     comm.Bcast(delta_boundary, root=size-1)
+    comm.Bcast(Pi_boundary,    root=size-1)
 
-    delta         -=  delta_boundary[0] # Elección del gauge
-    delta_boundary = np.inf # Para asegurarnos un buen uso del valore de delta en el boundary
+    delta         -= delta_boundary[0] # Elección del gauge
+    delta_boundary = np.zeros(1)
 
     sync(delta)
 
     # Para calcular A, utilizamos las expresión (8) de las notas de Javier:
     # Primera parte de la integración:
-    integrando  = rho*np.exp(-delta) - Pib(t)**2
+    integrando  = rho*np.exp(-delta) - np.exp(-delta_boundary[0])*Pi_boundary[0]**2
     integrando *= tan2x
 
     # Valor regularizado del integrando calculado a partir de la expansión en serie:
@@ -374,7 +379,7 @@ def delta_A_M_solver(Phi, Pi, x, t):
 
     # Calculamos la masa:
     if rank==size-1:
-        M = np.exp(delta[Nx])*integral[Nx] - 0.5*np.pi*Pib(t)**2
+        M = np.exp(delta[Nx])*integral[Nx] - 0.5*np.pi*Pi[Nx]**2
     else:
         M = 0.
 
@@ -394,7 +399,7 @@ def delta_A_M_solver(Phi, Pi, x, t):
     if rank==0:
         factor[ghost] = 0. # Regularización en x=0
 
-    A -= np.exp(delta)*factor*Pib(t)**2
+    A -= np.exp(delta)*factor*np.exp(-delta_boundary[0])*Pi_boundary[0]**2
 
     sync(A)
 
@@ -467,18 +472,16 @@ def k_Pi_solver(A, delta, Phi, Pi, x, t):
     if rank==0:
 
         # Punto i=0:
-        #dPhi0    = 2*(8*Phi[ghost+1] - Phi[ghost+2]) # Por paridad
-        dPhi0    = Phi[ghost-2] - 8*Phi[ghost-1] + 8*Phi[ghost+1] - Phi[ghost+2] 
+        dPhi0    = 2*(8*Phi[ghost+1] - Phi[ghost+2]) # Por paridad
+        #dPhi0    = Phi[ghost-2] - 8*Phi[ghost-1] + 8*Phi[ghost+1] - Phi[ghost+2] 
         dPhi0   /= 12*dx
 
         # Corregimos la derivada con el valor regular
         der[ghost]   = d*dPhi0*np.exp(-delta[ghost])
-        #der[ghost]   = 0.
 
     if rank==size-1:
 
         # Punto i=Nx:
-        #dPhiNx   = 0.
         dPhiNx   = dPib(t) # Forzamos el valor correcto en la frontera obtenido de la expansión en serie
 
         # Corregimos la derivada con el valor regular
@@ -492,7 +495,6 @@ def k_Pi_solver(A, delta, Phi, Pi, x, t):
 
     if rank==0:
         fov_Omega[ghost]  = (d-1)*dPhi0*np.exp(-delta[ghost])  # Regularización en x=0
-        #fov_Omega[ghost]  = 0.  # Regularización en x=0
 
     if rank==size-1:
         fov_Omega[Nx] = (d-1)*dPhiNx                   # Regularización en x=pi/2
@@ -503,7 +505,7 @@ def k_Pi_solver(A, delta, Phi, Pi, x, t):
     if rank==size-1:
 
         #for j in range(2*ghost,Nx):
-        for j in range(Nx-2,Nx):
+        for j in range(Nx-100,Nx):
 
             # Sustituimos la derivada en los puntos interiores:
             #der[j] = df[j] + df[j]/dOmega[j] - dfov_Omega[j]*Omega[j]/dOmega[j]
@@ -511,12 +513,8 @@ def k_Pi_solver(A, delta, Phi, Pi, x, t):
             # f' (1 + 2/cos(2x)) - 0.5*tan(2x)(f/sin(x)cos(x))'
             der[j] = df[j]*(1 + 2/np.cos(2*x[j]))- 0.5*np.tan(2*x[j])*dfov_Omega[j]
 
-    # Añadimos la disipación:
+    # Añadimos la disipación en las demás particiones:
     der += disipacion
-
-
-#    if rank==size-1:
-#        der[Nx] = 0.
 
     return der
     
@@ -607,9 +605,6 @@ if __name__ == '__main__':
     size = comm.Get_size()
     rank = comm.Get_rank()
 
-    if rank==0:
-        print(" Corriendo en %d cores" % size)
-
     # Calculamos los ids de los procesos izq. y der. del actual:
     ipr = rank + 1
     ipl = rank - 1
@@ -621,10 +616,9 @@ if __name__ == '__main__':
         ipl = MPI.PROC_NULL
 
     # Coeficiente de disipación:
-    Coef   = 0.00001
-    Coef   = 0.0001
     Coef   = 0.005
     Coef   = 0.0
+    Coef   = 0.00001
 
     d      = 3       # Dimensión de AdS_d+1
 
@@ -632,8 +626,12 @@ if __name__ == '__main__':
     points     = 2**10
 
     # Archivos de salida:
-    fout_evolucion = 'DC_evolucion_Source_a%4.2f_t%4.2fx%i.%i.nc' % (alpha, tau, points, rank)
-    fout_series    = 'DC_series_Source_a%4.2f_t%4.2fx%i.%i.nc' % (alpha, tau, points, rank)
+    if Coef==0.:
+        fout_evolucion = 'DC_evolucion_Source_a%4.2f_t%4.2fx%i.%i.sin.nc' % (alpha, tau, points, rank)
+        fout_series    = 'DC_series_Source_a%4.2f_t%4.2fx%i.%i.sin.nc' % (alpha, tau, points, rank)
+    else:
+        fout_evolucion = 'DC_evolucion_Source_a%4.2f_t%4.2fx%i.%i.nc' % (alpha, tau, points, rank)
+        fout_series    = 'DC_series_Source_a%4.2f_t%4.2fx%i.%i.nc' % (alpha, tau, points, rank)
 
     # Número de segmentos de la malla:
     segments   = points - 1
@@ -653,10 +651,13 @@ if __name__ == '__main__':
 
     # Calculamos el paso temporal:
     Courant = 0.1
+    Courant = 0.5
     dt      = Courant*dx
 
     if rank==0:
-        print 'dt=', dt
+        print(" Corriendo en %d cores" % size)
+        print("alpha = %4.2f" % alpha)
+        print("dt    = %4.2e" % dt)
 
     Nx, = x.shape 
     Nx -= (ghost + 1) # Corregimos la dimensión en el número de ghost points
@@ -683,17 +684,14 @@ if __name__ == '__main__':
     Pi  = InitialPi_new(alpha, points)[i:f]
     Phi = np.zeros_like(Pi)
 
-    Pi  = np.zeros_like(Phi)
+    # Solo el proceso rank+1 necesita el valor de Pi en el boundary:
+    if rank==size-1:
+        Pi0 = Pi[Nx]
+        print 'Pi0=', Pi0
 
-#    # Necesitamos el valor de Pi en el boundary:
-#    if rank == size-1:
-#        Pi_boundary = Pi[Nx:Nx+1]
-#    else:
-#        Pi_boundary = np.zeros(1)
-#
-#    comm.Bcast(Pi_boundary, root=size-1)
-#
-#    Pib =  Pi_boundary[0]
+    # Podemos usar el código anterior para inicializar solo el valor de Pi en la frontera:
+    if True:
+        Pi  = np.zeros_like(Phi)
 
     # Inicializamos los buffers de ghost points:
     BC(Phi, Pi, Time)
